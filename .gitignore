@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.zip
+run.log
+modell/
+soppkart_as.html
+.DS_Store
