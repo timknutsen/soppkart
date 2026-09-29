@@ -301,6 +301,11 @@ def prob_overlay(prob, lats, lons, color_hex):
 # Loggeverktoey i kartet. Lagrer funn i telefonens nettleser (localStorage) og
 # lar deg dele/laste ned CSV-linjer for mine_funn.csv. %%MAP%% og %%SPECIES%% fylles inn.
 MOBILE_CSS = """
+<script>
+  // Posisjon virker bare over https; send http-besoek videre (ikke localhost/fil).
+  if (location.protocol === 'http:' && !/^(localhost|127\.0\.0\.1)$/.test(location.hostname))
+    location.replace('https://' + location.host + location.pathname + location.search + location.hash);
+</script>
 <style>
   html, body { height: 100%; margin: 0; overscroll-behavior: none; }
   .leaflet-touch .leaflet-bar a { width: 44px; height: 44px; line-height: 44px; font-size: 20px; }
