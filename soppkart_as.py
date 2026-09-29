@@ -55,6 +55,10 @@ DEFAULT_SPECIES = ["Steinsopp", "Kantarell", "Svart trompetsopp", "Traktkantarel
 SR16_LAYERS = {"treslag": "SRRTRESLAG", "bonitet": "SRRBONITET", "kronedek": "SRRKRONEDEK", "skoghoyde": "SRRHOYDEM"}
 SR16_FIELDS = list(SR16_LAYERS)
 OWN_WEIGHT = 3.0
+# Egne funn lagres i Supabase (tabell soppfunn, RLS: bare egne rader). Noekkelen er
+# publiserbar og ment for nettleseren; tilgang styres av innlogging, ikke av noekkelen.
+SUPABASE_URL = "https://xishtaqioetncnczznuv.supabase.co"
+SUPABASE_KEY = "sb_publishable_uH-lmVlIlxiW-GQeXEH-3A_gIUEV_vW"
 
 # ---------------------------------------------------------------- geometry
 def haversine_km(lat1, lon1, lat2, lon2):
@@ -110,13 +114,46 @@ def fetch_gbif(sci, lat, lon, radius_km, year_min, max_unc, months=None):
     return rows
 
 # ---------------------------------------------------------------- own log
-def load_own(path):
+def load_env(path=".env"):
+    """Enkel .env-leser (KEY=verdi per linje), setter bare variabler som mangler."""
     if not os.path.exists(path):
-        with open(path, "w", encoding="utf-8") as f:
-            f.write("art,lat,lon,dato,funnet,mengde,notat\n")
-        print(f"Created empty {path}")
+        return
+    for line in open(path, encoding="utf-8"):
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            k, v = line.split("=", 1)
+            os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+
+def load_supabase():
+    """Henter egne funn fra Supabase med SOPPKART_EMAIL/SOPPKART_PASSWORD fra .env."""
+    email, pw = os.environ.get("SOPPKART_EMAIL"), os.environ.get("SOPPKART_PASSWORD")
+    if not (email and pw):
+        print("Supabase: SOPPKART_EMAIL/SOPPKART_PASSWORD mangler i .env, hopper over", file=sys.stderr)
         return []
-    out = []
+    h = {"apikey": SUPABASE_KEY, "Content-Type": "application/json"}
+    try:
+        tok = requests.post(f"{SUPABASE_URL}/auth/v1/token", params={"grant_type": "password"}, headers=h,
+                            json={"email": email, "password": pw}, timeout=30)
+        tok.raise_for_status()
+        h["Authorization"] = f"Bearer {tok.json()['access_token']}"
+        rows = requests.get(f"{SUPABASE_URL}/rest/v1/soppfunn", headers=h, timeout=30,
+                            params={"select": "art,lat,lon,dato,funnet,mengde,notat", "order": "dato"})
+        rows.raise_for_status()
+        rows = rows.json()
+    except Exception as e:
+        print(f"Supabase failed: {e}", file=sys.stderr)
+        return []
+    out = [{"art": r["art"], "lat": float(r["lat"]), "lon": float(r["lon"]), "dato": r["dato"] or "",
+            "funnet": 1 if r["funnet"] else 0, "mengde": r.get("mengde") or "", "notat": r.get("notat") or ""}
+           for r in rows]
+    print(f"Supabase: {len(out)} egne registreringer")
+    return out
+
+def load_own(path):
+    """Egne funn: Supabase (fra mobilen) pluss eventuell lokal mine_funn.csv."""
+    out = load_supabase()
+    if not os.path.exists(path):
+        return out
     with open(path, encoding="utf-8") as f:
         for r in csv.DictReader(f):
             try:
@@ -301,6 +338,7 @@ def prob_overlay(prob, lats, lons, color_hex):
 # Loggeverktoey i kartet. Lagrer funn i telefonens nettleser (localStorage) og
 # lar deg dele/laste ned CSV-linjer for mine_funn.csv. %%MAP%% og %%SPECIES%% fylles inn.
 MOBILE_CSS = """
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
   // Posisjon virker bare over https; send http-besoek videre (ikke localhost/fil).
   if (location.protocol === 'http:' && !/^(localhost|127\.0\.0\.1)$/.test(location.hostname))
@@ -324,96 +362,180 @@ MOBILE_CSS = """
   .sk-list { position: absolute; inset: auto 8px calc(84px + env(safe-area-inset-bottom)) 8px; z-index: 1001;
              max-height: 55vh; overflow-y: auto; background: #fff; border-radius: 12px; padding: 12px;
              box-shadow: 0 2px 12px rgba(0,0,0,.4); font-size: 14px; display: none; }
-  .sk-list pre { white-space: pre-wrap; word-break: break-all; font-size: 12px; background: #f4f4f4; padding: 8px; }
+  .sk-tbl { max-height: 30vh; overflow-y: auto; font-size: 13px; margin: 8px 0; line-height: 1.6; }
+  .sk-del { margin-top: 6px; padding: 6px 12px; border: 1px solid #c62828; color: #c62828; background: #fff; border-radius: 6px; }
   .sk-toast { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); z-index: 1002; background: #222;
               color: #fff; padding: 10px 16px; border-radius: 20px; font-size: 15px; display: none; }
 </style>
 """
 
 CLICK_JS = """
-var SK_SPECIES = %%SPECIES%%, SK_KEY = 'soppkart_funn';
-function skLoad() { try { return JSON.parse(localStorage.getItem(SK_KEY)) || []; } catch (e) { return []; } }
-function skSave(a) { try { localStorage.setItem(SK_KEY, JSON.stringify(a)); } catch (e) {} }
-function skLastArt() { try { return localStorage.getItem(SK_KEY + '_art') || SK_SPECIES[0]; } catch (e) { return SK_SPECIES[0]; } }
-function skCsv(r) { return [r.art, r.lat, r.lon, r.dato, r.funnet, r.mengde || '', (r.notat || '').replace(/,/g, ';')].join(','); }
+// Egne funn: lagres i Supabase (bare synlige for innlogget eier). Uten nett legges de
+// i en kø i nettleseren og sendes når nettet er tilbake.
+var SK_SPECIES = %%SPECIES%%, SK_Q = 'soppkart_koe', SK_ART = 'soppkart_art';
+var sb = window.supabase.createClient('%%SB_URL%%', '%%SB_KEY%%');
+var skUser = null, skRows = [], skLayer = null;
+
+function skGet(k, d) { try { return JSON.parse(localStorage.getItem(k)) || d; } catch (e) { return d; } }
+function skPut(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
+function skEsc(t) { return String(t == null ? '' : t).replace(/[&<>"']/g, function (c) {
+  return {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]; }); }
+function skUuid() { return (crypto.randomUUID ? crypto.randomUUID() :
+  'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
+    var r = Math.random() * 16 | 0; return (c === 'x' ? r : (r & 3 | 8)).toString(16); })); }
+function skCsv(r) { return [r.art, (+r.lat).toFixed(5), (+r.lon).toFixed(5), r.dato, r.funnet ? 1 : 0,
+  r.mengde || '', (r.notat || '').replace(/[,\\n]/g, ';')].join(','); }
 function skToast(t) { var el = document.getElementById('sk-toast'); el.textContent = t; el.style.display = 'block';
-  clearTimeout(el._t); el._t = setTimeout(function () { el.style.display = 'none'; }, 1800); }
+  clearTimeout(el._t); el._t = setTimeout(function () { el.style.display = 'none'; }, 2200); }
 
 function onMapClick(e) {
-  var map = %%MAP%%, la = e.latlng.lat.toFixed(5), lo = e.latlng.lng.toFixed(5), last = skLastArt();
+  var map = %%MAP%%;
+  if (!skUser) { skShowLogin(); return; }
+  var la = e.latlng.lat, lo = e.latlng.lng, acc = e.accuracy ? Math.round(e.accuracy) : '';
+  var last = skGet(SK_ART, SK_SPECIES[0]);
   var opts = SK_SPECIES.map(function (s) { return '<option' + (s === last ? ' selected' : '') + '>' + s + '</option>'; }).join('');
-  var html = '<div class="sk-pop"><b>Logg her</b> <small>' + la + ', ' + lo + '</small>' +
+  var html = '<div class="sk-pop"><b>Logg her</b> <small>' + la.toFixed(5) + ', ' + lo.toFixed(5) +
+    (acc ? ' (±' + acc + ' m)' : '') + '</small>' +
     '<select id="sk-art">' + opts + '</select>' +
-    '<input id="sk-notat" placeholder="Mengde / notat (valgfritt)">' +
-    '<div class="sk-row"><button class="sk-btn sk-yes" onclick="skAdd(' + la + ',' + lo + ',1)">Funnet</button>' +
-    '<button class="sk-btn sk-no" onclick="skAdd(' + la + ',' + lo + ',0)">Ingen funn</button></div></div>';
+    '<input id="sk-mengde" placeholder="Mengde (valgfritt)">' +
+    '<input id="sk-notat" placeholder="Notat (valgfritt)">' +
+    '<div class="sk-row"><button class="sk-btn sk-yes" onclick="skAdd(' + la + ',' + lo + ',true,\\'' + acc + '\\')">Funnet</button>' +
+    '<button class="sk-btn sk-no" onclick="skAdd(' + la + ',' + lo + ',false,\\'' + acc + '\\')">Ingen funn</button></div></div>';
   L.popup({maxWidth: Math.min(320, window.innerWidth - 40), autoPanPadding: [20, 80]})
     .setLatLng(e.latlng).setContent(html).openOn(map);
 }
 
-function skAdd(la, lo, funnet) {
-  var art = document.getElementById('sk-art').value, notat = document.getElementById('sk-notat').value.trim();
-  try { localStorage.setItem(SK_KEY + '_art', art); } catch (e) {}
-  var a = skLoad();
-  a.push({art: art, lat: la.toFixed(5), lon: lo.toFixed(5), dato: new Date().toISOString().slice(0, 10),
-          funnet: funnet, mengde: '', notat: notat});
-  skSave(a); %%MAP%%.closePopup(); skDraw(); skToast(funnet ? 'Funn lagret' : 'Blankt søk lagret');
+function skAdd(la, lo, funnet, acc) {
+  var art = document.getElementById('sk-art').value;
+  skPut(SK_ART, art);
+  var d = new Date(), dato = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  var row = {client_id: skUuid(), art: art, lat: +la.toFixed(6), lon: +lo.toFixed(6), dato: dato, funnet: funnet,
+             mengde: document.getElementById('sk-mengde').value.trim() || null,
+             notat: document.getElementById('sk-notat').value.trim() || null,
+             noyaktighet_m: acc ? +acc : null};
+  var q = skGet(SK_Q, []); q.push(row); skPut(SK_Q, q);
+  %%MAP%%.closePopup(); skDraw();
+  skFlush().then(function (ok) { skToast(ok ? (funnet ? 'Funn lagret' : 'Blankt søk lagret') : 'Lagret lokalt, sendes når du har nett'); });
 }
 
-var skLayer;
+// Send køen. client_id er unik, så gjentatte forsøk lager ikke duplikater.
+function skFlush() {
+  var q = skGet(SK_Q, []);
+  if (!skUser || !q.length) return Promise.resolve(!q.length);
+  return sb.from('soppfunn').upsert(q, {onConflict: 'client_id', ignoreDuplicates: true}).then(function (r) {
+    if (r.error) { console.warn('soppfunn', r.error.message); return false; }
+    var sent = q.map(function (x) { return x.client_id; });
+    skPut(SK_Q, skGet(SK_Q, []).filter(function (x) { return sent.indexOf(x.client_id) < 0; }));
+    return skLoad().then(function () { return true; });
+  }, function () { return false; });
+}
+
+function skLoad() {
+  if (!skUser) { skRows = []; skDraw(); return Promise.resolve(); }
+  return sb.from('soppfunn').select('id,client_id,art,lat,lon,dato,funnet,mengde,notat,noyaktighet_m')
+    .order('dato', {ascending: false}).then(function (r) {
+      if (r.error) { skToast('Kunne ikke hente funn: ' + r.error.message); return; }
+      skRows = r.data; skDraw();
+    });
+}
+
 function skDraw() {
-  var map = %%MAP%%, a = skLoad();
+  var map = %%MAP%%, q = skGet(SK_Q, []), all = skRows.concat(q.map(function (x) { x._ko = true; return x; }));
   if (skLayer) map.removeLayer(skLayer);
-  skLayer = L.layerGroup(a.map(function (r) {
-    return L.circleMarker([+r.lat, +r.lon], {radius: 8, weight: 2, color: '#fff',
-      fillColor: r.funnet == 1 ? '#2e7d32' : '#9e9e9e', fillOpacity: 0.95})
-      .bindPopup('<b>' + r.art + '</b><br>' + r.dato + (r.funnet == 1 ? ' funnet' : ' ingen funn') + (r.notat ? '<br>' + r.notat : ''));
+  skLayer = L.layerGroup(all.map(function (r) {
+    var mk = L.circleMarker([+r.lat, +r.lon], {radius: 8, weight: 2, color: r._ko ? '#f9a825' : '#fff',
+      fillColor: r.funnet ? '#2e7d32' : '#9e9e9e', fillOpacity: 0.95});
+    mk.bindPopup('<b>' + skEsc(r.art) + '</b><br>' + skEsc(r.dato) + (r.funnet ? ' funnet' : ' ingen funn') +
+      (r.mengde ? '<br>' + skEsc(r.mengde) : '') + (r.notat ? '<br>' + skEsc(r.notat) : '') +
+      (r._ko ? '<br><i>venter på nett</i>' : '<br><button class="sk-del" onclick="skDelete(' + r.id + ')">Slett</button>'));
+    return mk;
   })).addTo(map);
-  document.getElementById('sk-count').textContent = a.length;
+  document.getElementById('sk-count').textContent = all.length;
+}
+
+function skDelete(id) {
+  if (!confirm('Slette denne registreringen?')) return;
+  sb.from('soppfunn').delete().eq('id', id).then(function (r) {
+    if (r.error) { skToast('Kunne ikke slette: ' + r.error.message); return; }
+    %%MAP%%.closePopup(); skLoad(); skToast('Slettet');
+  });
 }
 
 function skShowList() {
-  var el = document.getElementById('sk-list'), a = skLoad();
+  var el = document.getElementById('sk-list');
   if (el.style.display === 'block') { el.style.display = 'none'; return; }
-  var csv = a.map(skCsv).join('\\n');
-  el.innerHTML = '<b>Mine loggede funn (' + a.length + ')</b><br><small>Lim inn i mine_funn.csv og bygg kartet på nytt.</small>' +
-    '<pre>' + (csv || 'Ingen funn logget ennå. Trykk i kartet eller på «Logg her».') + '</pre>' +
-    '<div class="sk-row"><button class="sk-btn sk-yes" onclick="skShare()">Del / kopier</button>' +
-    '<button class="sk-btn sk-no" onclick="skClear()">Slett alle</button></div>';
+  if (!skUser) { skShowLogin(); return; }
+  var q = skGet(SK_Q, []), n1 = skRows.filter(function (r) { return r.funnet; }).length;
+  el.innerHTML = '<b>Mine registreringer</b><br><small>' + n1 + ' funn, ' + (skRows.length - n1) + ' blanke søk' +
+    (q.length ? ', ' + q.length + ' venter på nett' : '') + '. Lagret i Supabase, og modellen henter dem ved neste bygging.</small>' +
+    '<div class="sk-tbl">' + (skRows.length ? skRows.slice(0, 50).map(function (r) {
+      return '<div>' + skEsc(r.dato) + ' · ' + skEsc(r.art) + ' · ' + (r.funnet ? 'funnet' : 'ingen') + '</div>'; }).join('')
+      : 'Ingen registreringer ennå.') + '</div>' +
+    '<div class="sk-row"><button class="sk-btn sk-yes" onclick="skExport()">Last ned CSV</button>' +
+    '<button class="sk-btn sk-no" onclick="skLogout()">Logg ut</button></div>' +
+    '<small>Innlogget som ' + skEsc(skUser.email) + '</small>';
   el.style.display = 'block';
 }
 
-function skShare() {
-  var csv = skLoad().map(skCsv).join('\\n');
-  if (!csv) return;
-  if (navigator.share) { navigator.share({title: 'Soppfunn', text: csv}).catch(function () {}); }
-  else if (navigator.clipboard) { navigator.clipboard.writeText(csv).then(function () { skToast('Kopiert'); }); }
-  else { var b = new Blob([csv + '\\n'], {type: 'text/csv'}), u = URL.createObjectURL(b), l = document.createElement('a');
-         l.href = u; l.download = 'mine_funn_nye.csv'; l.click(); }
+function skExport() {
+  var csv = 'art,lat,lon,dato,funnet,mengde,notat\\n' + skRows.map(skCsv).join('\\n') + '\\n';
+  var u = URL.createObjectURL(new Blob([csv], {type: 'text/csv'})), a = document.createElement('a');
+  a.href = u; a.download = 'mine_funn.csv'; document.body.appendChild(a); a.click(); a.remove();
 }
 
-function skClear() {
-  if (!confirm('Slette alle loggede funn på denne enheten?')) return;
-  skSave([]); skDraw(); document.getElementById('sk-list').style.display = 'none';
+function skShowLogin() {
+  var el = document.getElementById('sk-list');
+  el.innerHTML = '<b>Logg inn for å registrere funn</b><br><small>Funnene dine er private og lagres i Supabase.</small>' +
+    '<form id="sk-login" class="sk-pop" style="min-width:0">' +
+    '<input id="sk-email" type="email" autocomplete="username" placeholder="E-post" required>' +
+    '<input id="sk-pw" type="password" autocomplete="current-password" placeholder="Passord (minst 6 tegn)" required minlength="6">' +
+    '<div class="sk-row"><button class="sk-btn sk-yes" type="submit">Logg inn</button>' +
+    '<button class="sk-btn sk-no" type="button" onclick="skSignup()">Opprett konto</button></div></form>';
+  el.style.display = 'block';
+  document.getElementById('sk-login').onsubmit = function (ev) {
+    ev.preventDefault();
+    sb.auth.signInWithPassword({email: document.getElementById('sk-email').value.trim(),
+                                password: document.getElementById('sk-pw').value}).then(function (r) {
+      if (r.error) { skToast(r.error.message === 'Email not confirmed' ? 'Bekreft e-posten din først' : 'Feil e-post eller passord'); return; }
+      el.style.display = 'none'; skToast('Logget inn');
+    });
+  };
 }
+
+function skSignup() {
+  var email = document.getElementById('sk-email').value.trim(), pw = document.getElementById('sk-pw').value;
+  if (!email || pw.length < 6) { skToast('Fyll inn e-post og passord (minst 6 tegn)'); return; }
+  sb.auth.signUp({email: email, password: pw, options: {emailRedirectTo: location.origin + location.pathname}})
+    .then(function (r) {
+      if (r.error) { skToast(r.error.message); return; }
+      skToast(r.data.session ? 'Konto opprettet' : 'Sjekk e-posten for å bekrefte kontoen');
+    });
+}
+
+function skLogout() { sb.auth.signOut(); document.getElementById('sk-list').style.display = 'none'; }
 
 window.addEventListener('load', function () {
-  var map = %%MAP%%, shown = false, box = map.getContainer();
+  var map = %%MAP%%, shown = false, here = null, box = map.getContainer();
   box.insertAdjacentHTML('beforeend',
     '<div class="sk-bar"><button id="sk-here">Logg her</button><button id="sk-mine">Mine (<span id="sk-count">0</span>)</button></div>' +
     '<div class="sk-list" id="sk-list"></div><div class="sk-toast" id="sk-toast"></div>');
   ['sk-here', 'sk-mine', 'sk-list'].forEach(function (id) {
     var el = document.getElementById(id); L.DomEvent.disableClickPropagation(el); L.DomEvent.disableScrollPropagation(el); });
-  var here = null;
   document.getElementById('sk-here').onclick = function () {
-    if (here) { map.setView(here, Math.max(map.getZoom(), 16)); onMapClick({latlng: here}); }
-    else { skToast('Finner posisjon …'); map.locate({setView: true, maxZoom: 16, enableHighAccuracy: true}); shown = false; }
+    if (!skUser) { skShowLogin(); return; }
+    if (here) { map.setView(here.latlng, Math.max(map.getZoom(), 16)); onMapClick(here); }
+    else { skToast('Finner posisjon …'); shown = false; map.locate({setView: true, maxZoom: 16, enableHighAccuracy: true}); }
   };
   document.getElementById('sk-mine').onclick = skShowList;
-  map.on('click', onMapClick);
-  // Foerste gang posisjonen er funnet: aapne loggeruta der du staar.
-  map.on('locationfound', function (e) { here = e.latlng; if (!shown) { shown = true; onMapClick(e); } });
+  map.on('click', function (e) { document.getElementById('sk-list').style.display = 'none'; onMapClick(e); });
+  // Første gang posisjonen er funnet: åpne loggeruta der du står.
+  map.on('locationfound', function (e) { here = e; if (!shown) { shown = true; onMapClick(e); } });
   map.on('locationerror', function (e) { skToast('Fant ikke posisjonen: ' + e.message); });
+  window.addEventListener('online', skFlush);
+  sb.auth.onAuthStateChange(function (ev, session) {
+    skUser = session ? session.user : null;
+    setTimeout(function () { skLoad().then(skFlush); }, 0);
+  });
   skDraw();
 });
 """
@@ -452,14 +574,6 @@ def build_map(args):
                                 fill_opacity=0.9, popup=f"{label}<br>{r['date']}<br>{r['dataset']}").add_to(fg)
         fg.add_to(m)
 
-        fo = folium.FeatureGroup(name=f"{label}: mine ({len(found)} funn, {len(blank)} blanke)", show=True)
-        for r in found:
-            folium.CircleMarker([r["lat"], r["lon"]], radius=7, color="#1a7f37", weight=2, fill=True, fill_color=color,
-                                fill_opacity=1, popup=f"<b>Mitt funn</b> {label}<br>{r['dato']}<br>{r['mengde']}<br>{r['notat']}").add_to(fo)
-        for r in blank:
-            folium.CircleMarker([r["lat"], r["lon"]], radius=6, color="#999", weight=2, fill=True, fill_color="#eee",
-                                fill_opacity=1, popup=f"Ingen funn {label}<br>{r['dato']}<br>{r['notat']}").add_to(fo)
-        fo.add_to(m)
 
         pres = [(r["lat"], r["lon"], 1.0) for r in gb] + [(r["lat"], r["lon"], OWN_WEIGHT) for r in found]
         absn = [(r["lat"], r["lon"], OWN_WEIGHT) for r in blank]
@@ -484,7 +598,7 @@ def build_map(args):
     folium.LayerControl(collapsed=True).add_to(m)
     v = m.get_name()
     m.get_root().header.add_child(folium.Element(MOBILE_CSS))
-    js = CLICK_JS.replace("%%MAP%%", v).replace("%%SPECIES%%", json.dumps(list(SPECIES), ensure_ascii=False))
+    js = CLICK_JS.replace("%%MAP%%", v).replace("%%SB_URL%%", SUPABASE_URL).replace("%%SB_KEY%%", SUPABASE_KEY).replace("%%SPECIES%%", json.dumps(list(SPECIES), ensure_ascii=False))
     m.get_root().script.add_child(folium.Element(js))
     return m
 
@@ -512,6 +626,7 @@ def main():
                     help="ikke filtrer GBIF-funn paa artens sesongmaaneder")
     ap.add_argument("--probe", action="store_true")
     args = ap.parse_args()
+    load_env()
     if args.all_species:
         args.species = list(SPECIES)
     if args.probe:

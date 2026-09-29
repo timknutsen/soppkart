@@ -36,10 +36,16 @@ sjekkes inn.
 `funnet=0` betyr at vi lette der og fant ingenting. Disse radene er de eneste
 ekte fraværsdataene modellen har, og de er like viktige som funnene.
 
-I kartet (også på mobil) logges funn med posisjonsknappen, «Logg her» eller et
-trykk i kartet. Loggede funn lagres i nettleserens localStorage, og «Mine» gir
-CSV-linjer som limes inn i `mine_funn.csv`. Kartet er statisk, så nye funn
-påvirker modellen først etter ny bygging og push.
+Egne funn logges i kartet (posisjonsknappen, «Logg her» eller et trykk) og
+lagres i Supabase-tabellen `public.soppfunn` i prosjektet `xishtaqioetncnczznuv`.
+RLS gir hver innlogget bruker bare sine egne rader, og `anon` har ingen tilgang.
+Den publiserbare nøkkelen står i koden og er ufarlig; tilgangen styres av
+innloggingen. Offline-registreringer køes i localStorage og sendes med upsert på
+`client_id`, så nye forsøk ikke lager duplikater.
+
+Byggingen henter egne funn med `SOPPKART_EMAIL`/`SOPPKART_PASSWORD` fra `.env`
+(sjekkes ikke inn) og leser i tillegg `mine_funn.csv` hvis den finnes. Egne funn
+skrives aldri inn i `docs/index.html`; de lastes i nettleseren etter innlogging.
 
 ## Modell
 
@@ -65,8 +71,9 @@ sannsynlighetsflaten lagres som `.npy` per art.
   skoghøyde (`SRRHOYDEM`, dm) er stedfortreder. `--probe` viser råsvaret.
 - OpenStreetMap-fliser blokkeres når fila åpnes fra disk (ingen referrer).
   Kartverket topo er standard.
-- `docs/index.html` er offentlig. Egne funn i `mine_funn.csv` havner i kartet
-  og i repoet, så hemmelige steder blir synlige hvis repoet er offentlig.
+- `docs/index.html` er offentlig. Egne funn ligger ikke i den, men
+  sannsynlighetsflaten er trent med dem og kan indirekte avsløre gode områder.
+- Hvem som helst kan opprette en konto, men ser bare sine egne rader.
 - GBIF-funn er dugnadsdata og klumper seg rundt stier og tettsteder. Modellen
   lærer delvis hvor folk går. Egne blanke søk er motgiften.
 - 250 m rutenett er grovt for sopp. 100 m er bedre når cachen er varm.

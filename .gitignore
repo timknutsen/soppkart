@@ -5,3 +5,5 @@ run.log
 modell/
 soppkart_as.html
 .DS_Store
+.env
+mine_funn.csv
