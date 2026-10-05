@@ -287,7 +287,7 @@ function skShowLogin() {
 function skSignup() {
   var email = document.getElementById('sk-email').value.trim(), pw = document.getElementById('sk-pw').value;
   if (!email || pw.length < 6) { skToast('Fyll inn e-post og passord (minst 6 tegn)'); return; }
-  sb.auth.signUp({email: email, password: pw, options: {emailRedirectTo: location.origin + location.pathname}})
+  sb.auth.signUp({email: email, password: pw, options: {emailRedirectTo: 'https://timknutsen.no/soppkart/'}})
     .then(function (r) {
       if (r.error) { skToast(r.error.message); return; }
       skToast(r.data.session ? 'Konto opprettet' : 'Sjekk e-posten for å bekrefte kontoen');
