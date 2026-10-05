@@ -156,6 +156,8 @@
 // i en kø i nettleseren og sendes når nettet er tilbake.
 var SK_SPECIES = ["Steinsopp", "Kantarell", "Svart trompetsopp", "Traktkantarell", "Blek piggsopp", "Morkel", "Brunskrubb", "Gul trompetsopp"], SK_Q = 'soppkart_koe', SK_ART = 'soppkart_art';
 var sb = window.supabase.createClient('https://xishtaqioetncnczznuv.supabase.co', 'sb_publishable_uH-lmVlIlxiW-GQeXEH-3A_gIUEV_vW');
+// Midlertidig: false = ingen innlogging mot Supabase, funn lagres bare lokalt i nettleseren.
+var SK_ACCOUNT = false;
 var skUser = null, skRows = [], skLayer = null;
 
 function skGet(k, d) { try { return JSON.parse(localStorage.getItem(k)) || d; } catch (e) { return d; } }
@@ -172,7 +174,7 @@ function skToast(t) { var el = document.getElementById('sk-toast'); el.textConte
 
 function onMapClick(e) {
   var map = map_1df4a6bc40ae2079d16567c2fa4ed28a;
-  if (!skUser) { skShowLogin(); return; }
+  if (SK_ACCOUNT && !skUser) { skShowLogin(); return; }
   var la = e.latlng.lat, lo = e.latlng.lng, acc = e.accuracy ? Math.round(e.accuracy) : '';
   var last = skGet(SK_ART, SK_SPECIES[0]);
   var opts = SK_SPECIES.map(function (s) { return '<option' + (s === last ? ' selected' : '') + '>' + s + '</option>'; }).join('');
@@ -197,13 +199,13 @@ function skAdd(la, lo, funnet, acc) {
              noyaktighet_m: acc ? +acc : null};
   var q = skGet(SK_Q, []); q.push(row); skPut(SK_Q, q);
   map_1df4a6bc40ae2079d16567c2fa4ed28a.closePopup(); skDraw();
-  skFlush().then(function (ok) { skToast(ok ? (funnet ? 'Funn lagret' : 'Blankt søk lagret') : 'Lagret lokalt, sendes når du har nett'); });
+  skFlush().then(function (ok) { skToast(ok ? (funnet ? 'Funn lagret' : 'Blankt søk lagret') : (SK_ACCOUNT ? 'Lagret lokalt, sendes når du har nett' : 'Lagret lokalt i nettleseren')); });
 }
 
 // Send køen. client_id er unik, så gjentatte forsøk lager ikke duplikater.
 function skFlush() {
   var q = skGet(SK_Q, []);
-  if (!skUser || !q.length) return Promise.resolve(!q.length);
+  if (!SK_ACCOUNT || !skUser || !q.length) return Promise.resolve(!q.length);
   return sb.from('soppfunn').upsert(q, {onConflict: 'client_id', ignoreDuplicates: true}).then(function (r) {
     if (r.error) { console.warn('soppfunn', r.error.message); return false; }
     var sent = q.map(function (x) { return x.client_id; });
@@ -246,10 +248,10 @@ function skDelete(id) {
 function skShowList() {
   var el = document.getElementById('sk-list');
   if (el.style.display === 'block') { el.style.display = 'none'; return; }
-  if (!skUser) { skShowLogin(); return; }
+  if (SK_ACCOUNT && !skUser) { skShowLogin(); return; }
   var q = skGet(SK_Q, []), n1 = skRows.filter(function (r) { return r.funnet; }).length;
   el.innerHTML = '<b>Mine registreringer</b><br><small>' + n1 + ' funn, ' + (skRows.length - n1) + ' blanke søk' +
-    (q.length ? ', ' + q.length + ' venter på nett' : '') + '. Lagret i Supabase, og modellen henter dem ved neste bygging.</small>' +
+    (q.length ? ', ' + q.length + (SK_ACCOUNT ? ' venter på nett' : ' lagret lokalt') : '') + (SK_ACCOUNT ? '. Lagret i Supabase, og modellen henter dem ved neste bygging.' : '. Innlogging er av, funnene ligger bare i denne nettleseren.') + '</small>' +
     '<div class="sk-tbl">' + (skRows.length ? skRows.slice(0, 50).map(function (r) {
       return '<div>' + skEsc(r.dato) + ' · ' + skEsc(r.art) + ' · ' + (r.funnet ? 'funnet' : 'ingen') + '</div>'; }).join('')
       : 'Ingen registreringer ennå.') + '</div>' +
@@ -304,7 +306,7 @@ window.addEventListener('load', function () {
   ['sk-here', 'sk-mine', 'sk-list'].forEach(function (id) {
     var el = document.getElementById(id); L.DomEvent.disableClickPropagation(el); L.DomEvent.disableScrollPropagation(el); });
   document.getElementById('sk-here').onclick = function () {
-    if (!skUser) { skShowLogin(); return; }
+    if (SK_ACCOUNT && !skUser) { skShowLogin(); return; }
     if (here) { map.setView(here.latlng, Math.max(map.getZoom(), 16)); onMapClick(here); }
     else { skToast('Finner posisjon …'); shown = false; map.locate({setView: true, maxZoom: 16, enableHighAccuracy: true}); }
   };
